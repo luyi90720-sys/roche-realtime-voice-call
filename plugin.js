@@ -108,7 +108,9 @@
     // 情绪识别：用 MediaRecorder 的 analyser 提取声学特征→规则映射成标签注入提示词
     // 仅 MediaRecorder 路径生效（webkit/Groq/MiMo/百度/腾讯/Wit/Transformers.js/自托管）
     // Vosk 流式路径音频在原生层，JS 拿不到，不识别情绪（标签为空，不影响原功能）
-    emotionDetect: false
+    emotionDetect: false,
+    // 悬浮球注入后是否自动模拟回车发送（通话界面/聊天界面通用）
+    floatAutoEnter: true
   };
 
   // ============================================================
@@ -3466,6 +3468,19 @@
             ]),
             el('div', { class: 'rvc-hint' }, '开启后屏幕右下角出现红色悬浮球：拖动可移动位置，点击开始录音，再次点击停止并把识别文字注入当前聊天输入框。识别引擎优先用 Vosk（APK），浏览器环境回退到 Web Speech API。开关即时生效并自动保存。'),
             el('div', { class: 'rvc-hint' }, '插件面板关闭后悬浮球仍保留（后台保活），可在任意页面录音注入。如需彻底关闭悬浮球并清理后台，点下方按钮。'),
+            el('div', { class: 'rvc-toggle', style: { marginTop: '8px' } }, [
+              el('input', {
+                type: 'checkbox',
+                checked: !!s.floatAutoEnter,
+                onchange: function (e) {
+                  s.floatAutoEnter = e.target.checked;
+                  state.settings.floatAutoEnter = s.floatAutoEnter;
+                  saveSettings();
+                }
+              }),
+              el('span', {}, '注入后自动回车发送')
+            ]),
+            el('div', { class: 'rvc-hint' }, '开启后，悬浮球识别完文字注入输入框后会自动模拟回车键尝试发送。若通话/聊天界面用回车发送消息则直接生效；若用按钮发送则无效，关闭此项改为只注入不发送。'),
             el('button', {
               class: 'rvc-btn danger',
               style: { marginTop: '8px' },
@@ -4148,31 +4163,126 @@
         }
 
         // 注入文字到聊天输入框
+        // 判断元素是否可输入（input/textarea/contenteditable）
+        function isEditableElement(el) {
+          if (!el || el.disabled || el.readOnly) return false;
+          var tag = el.tagName;
+          if (tag === 'TEXTAREA') return true;
+          if (tag === 'INPUT') {
+            var t = (el.type || 'text').toLowerCase();
+            // 仅文本类 input 可注入
+            return t === 'text' || t === 'search' || t === '' || t === 'url' || t === 'tel';
+          }
+          if (el.isContentEditable) return true;
+          return false;
+        }
+
+        // 判断元素是否可见（非 display:none / 非 visibility:hidden / 有尺寸）
+        function isElementVisible(el) {
+          if (!el) return false;
+          try {
+            var rs = window.getComputedStyle(el);
+            if (rs.display === 'none' || rs.visibility === 'hidden') return false;
+            var r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) return false;
+            return true;
+          } catch (e) { return false; }
+        }
+
+        // 智能查找注入目标：优先当前聚焦元素，再按优先级扫所有可见可输入元素
+        function findInjectTarget() {
+          // 1. 当前聚焦元素（用户正在编辑的，包括通话界面的输入框）
+          var ae = document.activeElement;
+          if (ae && ae !== document.body && isEditableElement(ae) && isElementVisible(ae)) {
+            return ae;
+          }
+          // 2. 按优先级扫描可见可输入元素
+          var selectors = [
+            '.chat-input-textarea',                    // 主聊天输入框
+            'textarea:not([readonly]):not([disabled])', // 所有可见 textarea
+            'input[type="text"]:not([readonly]):not([disabled])',
+            'input[type="search"]:not([readonly]):not([disabled])',
+            'input:not([type]):not([readonly]):not([disabled])', // 无 type 的 input 默认是 text
+            '[contenteditable="true"]'                 // contenteditable
+          ];
+          for (var i = 0; i < selectors.length; i++) {
+            var list = document.querySelectorAll(selectors[i]);
+            for (var j = 0; j < list.length; j++) {
+              if (isElementVisible(list[j]) && isEditableElement(list[j])) {
+                return list[j];
+              }
+            }
+          }
+          return null;
+        }
+
+        // 模拟回车键（尝试触发发送）
+        function simulateEnterKey(el) {
+          if (!el) return;
+          try {
+            el.focus();
+            var opts = { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 };
+            el.dispatchEvent(new KeyboardEvent('keydown', opts));
+            el.dispatchEvent(new KeyboardEvent('keypress', opts));
+            el.dispatchEvent(new KeyboardEvent('keyup', opts));
+            // 部分框架监听 input 事件里的 Enter，再触发一次 input
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+          } catch (e) { /* ignore */ }
+        }
+
         function injectToChatInput(text) {
           if (!text) return;
-          // 查找输入框: 优先 .chat-input-textarea, 回退 textarea
-          var ta = document.querySelector('.chat-input-textarea') || document.querySelector('textarea:not([readonly])');
-          if (!ta) {
-            addCallMessageSafe('未找到聊天输入框');
-            return;
+          var target = findInjectTarget();
+          if (!target) {
+            addCallMessageSafe('未找到可输入框（当前页面无可见的 input/textarea/编辑区）');
+            return false;
           }
-          // 聚焦
-          try { ta.focus(); } catch (e) { /* ignore */ }
-          // 追加文字 (保留原有内容)
-          var orig = ta.value || '';
-          var sep = (orig && !orig.endsWith('\n') && !orig.endsWith(' ')) ? ' ' : '';
-          var newVal = orig + sep + text;
-          // 使用 native setter 触发 React/Vue 感知
-          var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-          if (setter && setter.set) {
-            setter.set.call(ta, newVal);
+          // 聚焦目标
+          try { target.focus(); } catch (e) { /* ignore */ }
+
+          if (target.isContentEditable) {
+            // contenteditable：用 execCommand 插入文本（保留光标位置，触发框架感知）
+            try {
+              // 光标移到末尾
+              var sel = window.getSelection();
+              var range = document.createRange();
+              range.selectNodeContents(target);
+              range.collapse(false);
+              sel.removeAllRanges();
+              sel.addRange(range);
+              // 插入文本
+              var ok = document.execCommand('insertText', false, text);
+              if (!ok) {
+                // execCommand 被废弃时的兜底：直接 appendChild
+                target.appendChild(document.createTextNode(text));
+                target.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            } catch (e) {
+              try { target.textContent = (target.textContent || '') + text; } catch (e2) { /* ignore */ }
+              target.dispatchEvent(new Event('input', { bubbles: true }));
+            }
           } else {
-            ta.value = newVal;
+            // input/textarea：用 native setter 触发 React/Vue 感知
+            var orig = target.value || '';
+            var sep = (orig && !orig.endsWith('\n') && !orig.endsWith(' ')) ? ' ' : '';
+            var newVal = orig + sep + text;
+            var proto = target.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+            var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (setter && setter.set) {
+              setter.set.call(target, newVal);
+            } else {
+              target.value = newVal;
+            }
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+            try { target.setSelectionRange(newVal.length, newVal.length); } catch (e) { /* ignore */ }
           }
-          // 触发 input 事件让框架感知变化
-          ta.dispatchEvent(new Event('input', { bubbles: true }));
-          // 光标移到末尾
-          try { ta.setSelectionRange(newVal.length, newVal.length); } catch (e) { /* ignore */ }
+
+          // 注入后自动模拟回车发送（可设置开关）
+          if (state.settings.floatAutoEnter) {
+            // 延迟 50ms 确保框架处理完 input 事件后再发 Enter
+            setTimeout(function () { simulateEnterKey(target); }, 50);
+          }
+          return true;
         }
 
         // 安全的 sys 消息 (悬浮球可能在非通话界面使用)
