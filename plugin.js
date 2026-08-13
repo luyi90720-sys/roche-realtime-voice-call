@@ -297,6 +297,16 @@
     '.rvc-float-tip{position:fixed;z-index:99999;background:rgba(20,20,30,0.92);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:#fff;padding:8px 14px;border-radius:10px;font-size:13px;max-width:260px;box-shadow:0 4px 24px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);pointer-events:none;white-space:pre-wrap;line-height:1.5}'
   ].join('\n');
 
+  // 悬浮球样式独立注入（unmount 不移除），确保插件面板关闭后悬浮球仍有样式
+  var FLOAT_CSS_TEXT = [
+    '.rvc-float-ball{position:fixed;z-index:99998;width:52px;height:52px;border-radius:50%;background:rgba(194,12,12,0.85);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 4px 20px rgba(194,12,12,0.4),inset 0 1px 0 rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;transition:transform .15s,box-shadow .15s;touch-action:none}',
+    '.rvc-float-ball:hover{transform:scale(1.08);box-shadow:0 6px 28px rgba(194,12,12,0.55),inset 0 1px 0 rgba(255,255,255,0.2)}',
+    '.rvc-float-ball.recording{background:rgba(220,38,38,0.9);animation:rvc-float-pulse 1.2s ease-in-out infinite}',
+    '.rvc-float-ball svg{width:24px;height:24px;fill:#fff;pointer-events:none}',
+    '@keyframes rvc-float-pulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,0.5),0 4px 20px rgba(194,12,12,0.4)}50%{box-shadow:0 0 0 14px rgba(220,38,38,0),0 4px 20px rgba(194,12,12,0.4)}}',
+    '.rvc-float-tip{position:fixed;z-index:99999;background:rgba(20,20,30,0.92);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:#fff;padding:8px 14px;border-radius:10px;font-size:13px;max-width:260px;box-shadow:0 4px 24px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);pointer-events:none;white-space:pre-wrap;line-height:1.5}'
+  ].join('\n');
+
   // ============================================================
   // 工具函数
   // ============================================================
@@ -466,6 +476,13 @@
         styleEl.id = 'rvc-styles';
         styleEl.textContent = CSS_TEXT;
         document.head.appendChild(styleEl);
+        // 悬浮球样式独立注入（unmount 时不移除，保证面板关闭后悬浮球仍有样式）
+        if (!document.getElementById('rvc-float-styles')) {
+          var fStyle = document.createElement('style');
+          fStyle.id = 'rvc-float-styles';
+          fStyle.textContent = FLOAT_CSS_TEXT;
+          document.head.appendChild(fStyle);
+        }
 
         // ===== 创建根元素 =====
         var root = document.createElement('div');
@@ -3447,7 +3464,17 @@
               }),
               el('span', {}, '启用悬浮语音球（任意页面点击录音→转文字→注入输入框）')
             ]),
-            el('div', { class: 'rvc-hint' }, '开启后屏幕右下角出现红色悬浮球：拖动可移动位置，点击开始录音，再次点击停止并把识别文字注入当前聊天输入框。识别引擎优先用 Vosk（APK），浏览器环境回退到 Web Speech API。开关即时生效并自动保存。')
+            el('div', { class: 'rvc-hint' }, '开启后屏幕右下角出现红色悬浮球：拖动可移动位置，点击开始录音，再次点击停止并把识别文字注入当前聊天输入框。识别引擎优先用 Vosk（APK），浏览器环境回退到 Web Speech API。开关即时生效并自动保存。'),
+            el('div', { class: 'rvc-hint' }, '插件面板关闭后悬浮球仍保留（后台保活），可在任意页面录音注入。如需彻底关闭悬浮球并清理后台，点下方按钮。'),
+            el('button', {
+              class: 'rvc-btn danger',
+              style: { marginTop: '8px' },
+              onclick: function () {
+                if (!confirm('确定彻底关闭悬浮球？将停止录音、移除悬浮球并清理后台，需重新在设置里开启才能恢复。')) return;
+                forceShutdownFloatBall();
+                renderList();
+              }
+            }, '彻底关闭悬浮球（清理后台）')
           ]));
 
           // 情绪识别区
@@ -4368,6 +4395,24 @@
           syncFloatState();
         }
 
+        // 彻底关闭悬浮球：停录音 + 移除 DOM + 移除独立样式 + 清全局态 + 关设置
+        // 仅在插件面板打开时（设置页按钮）可调用，面板关闭后此函数随闭包一起销毁
+        function forceShutdownFloatBall() {
+          if (floatRecording) {
+            try { stopFloatRecording(); } catch (e) { /* ignore */ }
+          }
+          if (floatBall) { try { floatBall.remove(); } catch (e) { /* ignore */ } floatBall = null; }
+          if (floatTip) { try { floatTip.remove(); } catch (e) { /* ignore */ } floatTip = null; }
+          var fStyle = document.getElementById('rvc-float-styles');
+          if (fStyle) fStyle.remove();
+          // 清全局态，下次 mount 时重新初始化
+          if (window._rvcFloat) { window._rvcFloat = null; delete window._rvcFloat; }
+          // 关闭设置并持久化
+          state.settings.floatingBall = false;
+          syncFloatState();
+          try { saveSettings(); } catch (e) { /* ignore */ }
+        }
+
         // 根据设置更新悬浮球显示状态
         function updateFloatBallVisibility() {
           if (state.settings.floatingBall) showFloatBall();
@@ -4401,14 +4446,17 @@
       },
 
       async unmount(container, roche) {
-        // 调用 mount 里注册的清理函数
+        // 调用 mount 里注册的清理函数（停通话录音/音频/识别，不含悬浮球）
         var root = container.querySelector('.rvc-root');
         if (root && typeof root._rvcCleanup === 'function') {
           try { root._rvcCleanup(); } catch (e) { /* ignore */ }
         }
-        // 移除插件注入的样式
+        // 移除面板样式（#rvc-styles），但保留悬浮球独立样式（#rvc-float-styles）
+        // 这样插件面板关闭后悬浮球仍有样式，可继续使用
         var styles = document.getElementById('rvc-styles');
         if (styles) styles.remove();
+        // 只清面板容器，悬浮球 DOM 挂在 document.body 上不受影响
+        // 悬浮球 DOM / 样式 / window._rvcFloat 全局态由设置页「彻底关闭悬浮球」按钮清理
         container.innerHTML = '';
       }
     }]
