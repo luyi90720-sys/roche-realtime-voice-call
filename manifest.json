@@ -1,0 +1,20 @@
+{
+  "id": "realtime-voice-call",
+  "name": "实时语音通话",
+  "version": "2.0.0",
+  "description": "全仿手机电话通话界面：选择角色+每角色独立配置(背景/voiceId/记忆挂载/世界书)+实时语音或文字对话+挂断后注入到角色单聊短期记忆",
+  "author": "Roche Plugin",
+  "entry": "https://raw.githubusercontent.com/luyi90720-sys/roche-realtime-voice-call/main/plugin.js",
+  "hash": "",
+  "permissions": [
+    "persona:read",
+    "character:read",
+    "conversation:read",
+    "memory:read",
+    "worldbook:read",
+    "ai:chat",
+    "voice:tts",
+    "storage",
+    "ui"
+  ]
+}
